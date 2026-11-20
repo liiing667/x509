@@ -1,6 +1,7 @@
-import { CertificationRequest } from "@peculiar/asn1-csr";
+import { CertificationRequest, CertificationRequestInfo } from "@peculiar/asn1-csr";
 import { AsnConvert } from "@peculiar/asn1-schema";
 import { id_pkcs9_at_extensionRequest } from "@peculiar/asn1-pkcs9";
+import { equal } from "@peculiar/utils";
 import { container } from "tsyringe";
 import { Version } from "@peculiar/asn1-x509";
 import { Name } from "./name";
@@ -129,7 +130,7 @@ export class Pkcs10CertificateRequest extends PemData<CertificationRequest> impl
    */
   public get attributes(): Attribute[] {
     if (!this.#attributes) {
-      this.#attributes = this.asn.certificationRequestInfo.attributes.map((o) => AttributeFactory.create(AsnConvert.serialize(o), this.parseOptions));
+      this.#attributes = (this.asn.certificationRequestInfo.attributes ?? []).map((o) => AttributeFactory.create(AsnConvert.serialize(o), this.parseOptions));
     }
 
     return this.#attributes;
@@ -179,8 +180,18 @@ export class Pkcs10CertificateRequest extends PemData<CertificationRequest> impl
     this.tag = PemConverter.CertificateRequestTag;
   }
 
-  protected onInit(_asn: CertificationRequest): void {
-    // Initialization is now lazy
+  protected onInit(asn: CertificationRequest): void {
+    // A certification request is a single identity: each attribute type may appear only
+    // once. With duplicates, consumers picking different values from the same signed set
+    // (e.g. the first vs the last `extensionRequest`) would derive different subjects,
+    // public keys or extensions from one request, so reject the request instead.
+    const attributeTypes = new Set<string>();
+    for (const attribute of asn.certificationRequestInfo.attributes ?? []) {
+      if (attributeTypes.has(attribute.type)) {
+        throw new Error(`PKCS#10 certification request contains a duplicate '${attribute.type}' attribute`);
+      }
+      attributeTypes.add(attribute.type);
+    }
   }
 
   /**
@@ -234,6 +245,22 @@ export class Pkcs10CertificateRequest extends PemData<CertificationRequest> impl
    * @param crypto Crypto provider. Default is from CryptoProvider
    */
   public async verify(crypto = cryptoProvider.get()) {
+    // The signature, subject, public key and attributes must belong to the same request.
+    // The accessors expose the parsed certification request info while the signature
+    // covers the original TBS bytes, so require both to be the same value. Canonical
+    // (re-serialized) forms are compared to tolerate equivalent encodings (e.g. an
+    // omitted vs an empty attributes element) while rejecting any semantic difference
+    // such as a swapped subject public key, subject or extension set.
+    let signedInfo: ArrayBuffer;
+    try {
+      signedInfo = AsnConvert.serialize(AsnConvert.parse(this.tbs, CertificationRequestInfo, this.parseOptions));
+    } catch {
+      return false;
+    }
+    if (!equal(signedInfo, AsnConvert.serialize(this.asn.certificationRequestInfo))) {
+      return false;
+    }
+
     const algorithm = {
       ...this.publicKey.algorithm,
       ...this.signatureAlgorithm,
