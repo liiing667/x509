@@ -224,6 +224,241 @@ describe("GeneralName", () => {
       });
     }
   });
+
+  describe("canonicalValue", () => {
+    it("preserves the raw value", () => {
+      const name = new x509.GeneralName("dns", "Example.COM.");
+      expect(name.value).toBe("Example.COM.");
+      expect(name.canonicalValue).toBe("example.com");
+    });
+
+    const tests: {
+      name: string;
+      args: { type: x509.GeneralNameType; value: string };
+      want: string;
+    }[] = [
+      {
+        name: "dns: lowercase",
+        args: { type: "dns", value: "Example.COM" },
+        want: "example.com",
+      },
+      {
+        name: "dns: trailing dot",
+        args: { type: "dns", value: "example.com." },
+        want: "example.com",
+      },
+      {
+        name: "dns: IDN to punycode",
+        args: { type: "dns", value: "bücher.de" },
+        want: "xn--bcher-kva.de",
+      },
+      {
+        name: "email: case-insensitive",
+        args: { type: "email", value: "User@Example.COM" },
+        want: "user@example.com",
+      },
+      {
+        name: "email: IDN domain",
+        args: { type: "email", value: "user@bücher.de" },
+        want: "user@xn--bcher-kva.de",
+      },
+      {
+        name: "ip: IPv4",
+        args: { type: "ip", value: "192.168.0.1" },
+        want: "c0a80001",
+      },
+      {
+        name: "ip: IPv6 compressed",
+        args: { type: "ip", value: "::1" },
+        want: "00000000000000000000000000000001",
+      },
+      {
+        name: "ip: IPv6 full form",
+        args: { type: "ip", value: "2001:0db8:0000:0000:0000:0000:0000:0001" },
+        want: "20010db8000000000000000000000001",
+      },
+      {
+        name: "ip: IPv6 embedded IPv4",
+        args: { type: "ip", value: "::ffff:192.168.0.1" },
+        want: "00000000000000000000ffffc0a80001",
+      },
+      {
+        name: "url: scheme and host case",
+        args: { type: "url", value: "HTTPS://Example.COM/path" },
+        want: "https://example.com/path",
+      },
+      {
+        name: "url: default port",
+        args: { type: "url", value: "https://example.com:443/" },
+        want: "https://example.com/",
+      },
+      {
+        name: "url: host trailing dot",
+        args: { type: "url", value: "https://example.com./" },
+        want: "https://example.com/",
+      },
+      {
+        name: "url: IDN host",
+        args: { type: "url", value: "https://bücher.de/" },
+        want: "https://xn--bcher-kva.de/",
+      },
+      {
+        name: "guid: case-insensitive",
+        args: { type: "guid", value: "33636766-DEE4-4AC5-A4AE-AF8380C7A655" },
+        want: "33636766-dee4-4ac5-a4ae-af8380c7a655",
+      },
+    ];
+    for (const t of tests) {
+      it(t.name, () => {
+        const name = new x509.GeneralName(t.args.type, t.args.value);
+        expect(name.canonicalValue).toBe(t.want);
+      });
+    }
+  });
+
+  describe("matches", () => {
+    const tests: {
+      name: string;
+      left: { type: x509.GeneralNameType; value: string };
+      right: { type: x509.GeneralNameType; value: string };
+      want: boolean;
+    }[] = [
+      {
+        name: "dns: same name",
+        left: { type: "dns", value: "example.com" },
+        right: { type: "dns", value: "example.com" },
+        want: true,
+      },
+      {
+        name: "dns: case difference",
+        left: { type: "dns", value: "Example.COM" },
+        right: { type: "dns", value: "example.com" },
+        want: true,
+      },
+      {
+        name: "dns: trailing dot",
+        left: { type: "dns", value: "example.com." },
+        right: { type: "dns", value: "example.com" },
+        want: true,
+      },
+      {
+        name: "dns: IDN and punycode",
+        left: { type: "dns", value: "bücher.de" },
+        right: { type: "dns", value: "xn--bcher-kva.de" },
+        want: true,
+      },
+      {
+        name: "dns: different names",
+        left: { type: "dns", value: "example.com" },
+        right: { type: "dns", value: "example.org" },
+        want: false,
+      },
+      {
+        name: "dns: suffix is not a match",
+        left: { type: "dns", value: "example.com" },
+        right: { type: "dns", value: "notexample.com" },
+        want: false,
+      },
+      {
+        name: "email: case difference",
+        left: { type: "email", value: "User@Example.COM" },
+        right: { type: "email", value: "user@example.com" },
+        want: true,
+      },
+      {
+        name: "email: different local part",
+        left: { type: "email", value: "user@example.com" },
+        right: { type: "email", value: "other@example.com" },
+        want: false,
+      },
+      {
+        name: "ip: same IPv4",
+        left: { type: "ip", value: "192.168.0.1" },
+        right: { type: "ip", value: "192.168.0.1" },
+        want: true,
+      },
+      {
+        name: "ip: different IPv4",
+        left: { type: "ip", value: "192.168.0.1" },
+        right: { type: "ip", value: "192.168.0.2" },
+        want: false,
+      },
+      {
+        name: "ip: IPv6 compressed and full form",
+        left: { type: "ip", value: "::1" },
+        right: { type: "ip", value: "0:0:0:0:0:0:0:1" },
+        want: true,
+      },
+      {
+        name: "ip: IPv6 embedded IPv4 forms",
+        left: { type: "ip", value: "::ffff:192.168.0.1" },
+        right: { type: "ip", value: "::ffff:c0a8:1" },
+        want: true,
+      },
+      {
+        name: "ip: different IPv6",
+        left: { type: "ip", value: "::1" },
+        right: { type: "ip", value: "::2" },
+        want: false,
+      },
+      {
+        name: "url: case and default port",
+        left: { type: "url", value: "HTTPS://Example.COM:443/path" },
+        right: { type: "url", value: "https://example.com/path" },
+        want: true,
+      },
+      {
+        name: "url: different hosts",
+        left: { type: "url", value: "https://example.com/" },
+        right: { type: "url", value: "https://example.org/" },
+        want: false,
+      },
+      {
+        name: "url: different paths",
+        left: { type: "url", value: "https://example.com/a" },
+        right: { type: "url", value: "https://example.com/b" },
+        want: false,
+      },
+      {
+        name: "upn: same value",
+        left: { type: "upn", value: "user@domain.com" },
+        right: { type: "upn", value: "user@domain.com" },
+        want: true,
+      },
+      {
+        name: "different types: dns vs upn",
+        left: { type: "dns", value: "domain.com" },
+        right: { type: "upn", value: "domain.com" },
+        want: false,
+      },
+      {
+        name: "different types: email vs upn",
+        left: { type: "email", value: "user@domain.com" },
+        right: { type: "upn", value: "user@domain.com" },
+        want: false,
+      },
+      {
+        name: "different types: dns vs url host",
+        left: { type: "dns", value: "example.com" },
+        right: { type: "url", value: "https://example.com/" },
+        want: false,
+      },
+      {
+        name: "different types: ip vs dns",
+        left: { type: "ip", value: "192.168.0.1" },
+        right: { type: "dns", value: "192.168.0.1" },
+        want: false,
+      },
+    ];
+    for (const t of tests) {
+      it(t.name, () => {
+        const left = new x509.GeneralName(t.left.type, t.left.value);
+        const right = new x509.GeneralName(t.right.type, t.right.value);
+        expect(left.matches(right)).toBe(t.want);
+        expect(right.matches(left)).toBe(t.want);
+      });
+    }
+  });
 });
 
 describe("GeneralNames", () => {
@@ -346,5 +581,75 @@ describe("GeneralNames", () => {
         expect(text).toBe(t.want);
       });
     }
+  });
+
+  describe("matches", () => {
+    it("matches the same names in a different order", () => {
+      const left = new x509.GeneralNames([
+        { type: "dns", value: "example.com" },
+        { type: "email", value: "user@example.com" },
+        { type: "ip", value: "192.168.0.1" },
+      ]);
+      const right = new x509.GeneralNames([
+        { type: "ip", value: "192.168.0.1" },
+        { type: "dns", value: "Example.COM." },
+        { type: "email", value: "User@example.com" },
+      ]);
+      expect(left.matches(right)).toBe(true);
+      expect(right.matches(left)).toBe(true);
+    });
+
+    it("matches multi-value names of the same type", () => {
+      const left = new x509.GeneralNames([
+        { type: "dns", value: "example.com" },
+        { type: "dns", value: "www.example.com" },
+      ]);
+      const right = new x509.GeneralNames([
+        { type: "dns", value: "www.example.com" },
+        { type: "dns", value: "example.com" },
+      ]);
+      expect(left.matches(right)).toBe(true);
+    });
+
+    it("does not match lists of different sizes", () => {
+      const left = new x509.GeneralNames([
+        { type: "dns", value: "example.com" },
+        { type: "dns", value: "www.example.com" },
+      ]);
+      const right = new x509.GeneralNames([{ type: "dns", value: "example.com" }]);
+      expect(left.matches(right)).toBe(false);
+      expect(right.matches(left)).toBe(false);
+    });
+
+    it("does not match when a name differs", () => {
+      const left = new x509.GeneralNames([
+        { type: "dns", value: "example.com" },
+        { type: "email", value: "user@example.com" },
+      ]);
+      const right = new x509.GeneralNames([
+        { type: "dns", value: "example.com" },
+        { type: "email", value: "other@example.com" },
+      ]);
+      expect(left.matches(right)).toBe(false);
+    });
+
+    it("does not match names of different types with equal text", () => {
+      const left = new x509.GeneralNames([{ type: "email", value: "user@domain.com" }]);
+      const right = new x509.GeneralNames([{ type: "upn", value: "user@domain.com" }]);
+      expect(left.matches(right)).toBe(false);
+    });
+
+    it("matches SAN extension names after a DER round trip", () => {
+      const san = new x509.SubjectAlternativeNameExtension([
+        { type: "dns", value: "example.com" },
+        { type: "dns", value: "www.example.com" },
+        { type: "email", value: "user@example.com" },
+        { type: "ip", value: "192.168.0.1" },
+        { type: "url", value: "https://example.com/" },
+      ]);
+      const parsed = new x509.SubjectAlternativeNameExtension(san.rawData);
+      expect(parsed.names.items.length).toBe(5);
+      expect(parsed.names.matches(san.names)).toBe(true);
+    });
   });
 });
