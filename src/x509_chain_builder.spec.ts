@@ -573,3 +573,61 @@ describe("X509ChainBuilder.buildToAnchor", () => {
     }
   });
 });
+
+describe("X509ChainBuilder.build AKI authority certificate identifier", () => {
+  const crypto = x509.cryptoProvider.get();
+  const algorithm = { name: "ECDSA", namedCurve: "P-256", hash: "SHA-256" } as const;
+  let serial = 0;
+
+  async function issue(subject: string, keys: CryptoKeyPair, parent?: { subject: string; keys: CryptoKeyPair }, extensions: x509.Extension[] = []) {
+    return x509.X509CertificateGenerator.create(
+      {
+        serialNumber: (++serial).toString(16).padStart(4, "0"),
+        subject: `CN=${subject}`,
+        issuer: parent ? `CN=${parent.subject}` : `CN=${subject}`,
+        publicKey: keys.publicKey,
+        signingKey: parent?.keys.privateKey || keys.privateKey,
+        signingAlgorithm: algorithm,
+        notBefore: new Date("2020-01-01T00:00:00Z"),
+        notAfter: new Date("2021-01-01T00:00:00Z"),
+        extensions,
+      },
+      crypto,
+    );
+  }
+
+  const keyPairs = async (count: number) => Promise.all(Array.from({ length: count }, () => crypto.subtle.generateKey(algorithm, false, ["sign", "verify"]) as Promise<CryptoKeyPair>));
+
+  it("matches the AKI issuer name and serial against the candidate subject, not its SAN extension", async () => {
+    const [rootKeys, wrongKeys, rightKeys, leafKeys] = await keyPairs(4);
+    const root = await issue("Root", rootKeys);
+    const wrong = await issue("Shared CA", wrongKeys, { subject: "Root", keys: rootKeys });
+    const san = new x509.SubjectAlternativeNameExtension([{ type: "url", value: "https://example.invalid/ca" }]);
+    const right = await issue("Shared CA", rightKeys, { subject: "Root", keys: rootKeys }, [san]);
+    const aki = new x509.AuthorityKeyIdentifierExtension({
+      name: new x509.GeneralNames([{ type: x509.DN, value: right.subject }]),
+      serialNumber: right.serialNumber,
+    });
+    const leaf = await issue("Leaf", leafKeys, { subject: "Shared CA", keys: rightKeys }, [aki]);
+
+    const builder = new x509.X509ChainBuilder({ certificates: [wrong, right, root] });
+    const path = await builder.build(leaf, crypto);
+    expect(path.length).toBe(3);
+    expect(path[1]).toBe(right);
+  });
+
+  it("does not treat a mismatched AKI certificate identifier as a match, even when names and signatures otherwise align", async () => {
+    const [rootKeys, firstKeys, leafKeys] = await keyPairs(3);
+    const root = await issue("Root", rootKeys);
+    const first = await issue("Shared CA", firstKeys, { subject: "Root", keys: rootKeys });
+    // Same subject and key as the issuer, but the AKI names a non-existent serial number.
+    const aki = new x509.AuthorityKeyIdentifierExtension({
+      name: new x509.GeneralNames([{ type: x509.DN, value: first.subject }]),
+      serialNumber: "ff",
+    });
+    const leaf = await issue("Leaf", leafKeys, { subject: "Shared CA", keys: firstKeys }, [aki]);
+
+    const path = await new x509.X509ChainBuilder({ certificates: [first, root] }).build(leaf, crypto);
+    expect(path.length).toBe(1);
+  });
+});

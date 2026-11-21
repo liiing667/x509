@@ -171,8 +171,12 @@ export class X509ChainBuilder {
               continue;
             }
           } else if (akiExt.certId) {
-            const sanExt = item.getExtension<SubjectKeyIdentifierExtension>(asn1X509.id_ce_subjectAltName);
-            if (sanExt && !(akiExt.certId.serialNumber === item.serialNumber && equal(AsnConvert.serialize(akiExt.certId.name), AsnConvert.serialize(sanExt)))) {
+            // The AKI certificate identifier names the issuer by its serial number and issuer name.
+            // The issuer name is a directoryName GeneralName, not a Subject Alternative Name extension.
+            const authorityName = Array.isArray(akiExt.certId.name) ? akiExt.certId.name : [];
+            const directoryNames = authorityName.filter((name): name is asn1X509.GeneralName & { directoryName: asn1X509.Name } => !!name?.directoryName);
+            const nameMatches = directoryNames.length ? directoryNames.some((name) => equal(AsnConvert.serialize(name.directoryName), item.subjectName.toArrayBuffer())) : true;
+            if (akiExt.certId.serialNumber !== item.serialNumber || !nameMatches) {
               continue;
             }
           }
