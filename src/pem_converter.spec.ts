@@ -331,4 +331,141 @@ describe("PEM", () => {
       });
     });
   });
+
+  describe("inspect", () => {
+    const certBlock = ["-----BEGIN CERTIFICATE-----", base64_splitted, "-----END CERTIFICATE-----"].join("\n");
+    const crlBlock = ["-----BEGIN CRL-----", base64_splitted, "-----END CRL-----"].join("\n");
+    const csrBlock = ["-----BEGIN CERTIFICATE REQUEST-----", base64_splitted, "-----END CERTIFICATE REQUEST-----"].join("\n");
+
+    it("single certificate block", () => {
+      const inventory = src.PemConverter.inspect(certBlock);
+
+      expect(inventory.ok).toBe(true);
+      expect(inventory.blocks.length).toBe(1);
+      expect(inventory.blocks[0].type).toBe("CERTIFICATE");
+      expect(inventory.blocks[0].index).toBe(0);
+      expect(inventory.blocks[0].offset).toBe(0);
+      expect(inventory.dangling).toEqual([]);
+      expect(inventory.issues).toEqual([]);
+    });
+
+    it("single CRL and CSR blocks", () => {
+      for (const pem of [crlBlock, csrBlock]) {
+        const inventory = src.PemConverter.inspect(pem);
+
+        expect(inventory.ok).toBe(true);
+        expect(inventory.blocks.length).toBe(1);
+        expect(inventory.issues).toEqual([]);
+      }
+    });
+
+    it("empty and whitespace only input", () => {
+      for (const pem of ["", "  \n \n"]) {
+        const inventory = src.PemConverter.inspect(pem);
+
+        expect(inventory.ok).toBe(true);
+        expect(inventory.blocks).toEqual([]);
+        expect(inventory.dangling).toEqual([]);
+        expect(inventory.issues).toEqual([]);
+      }
+    });
+
+    it("mixed bundle with duplicates, unknown type, truncated block and trailing text", () => {
+      const pem = [
+        "leading text",
+        certBlock,
+        certBlock, // duplicate
+        "-----BEGIN FOO-----",
+        base64_splitted,
+        "-----END FOO-----",
+        "trailing text",
+        "-----BEGIN BAR-----",
+        base64_splitted,
+      ].join("\n");
+
+      const inventory = src.PemConverter.inspect(pem);
+
+      expect(inventory.ok).toBe(false);
+      expect(inventory.blocks.length).toBe(3);
+      expect(inventory.blocks.map((o) => o.type)).toEqual(["CERTIFICATE", "CERTIFICATE", "FOO"]);
+
+      // blocks match what the loader sees
+      const structs = src.PemConverter.decodeWithHeaders(pem);
+      expect(inventory.blocks.map((o) => ({ type: o.type, headers: o.headers, rawData: o.rawData }))).toEqual(structs.map((o) => ({ type: o.type, headers: o.headers, rawData: o.rawData })));
+
+      expect(inventory.dangling.map((o) => o.kind)).toEqual(["text", "text", "truncated"]);
+      expect(inventory.dangling[0].text).toBe("leading text");
+      expect(inventory.dangling[1].text).toBe("trailing text");
+      expect(inventory.dangling[2].type).toBe("BAR");
+
+      const issueTypes = inventory.issues.map((o) => o.type);
+      expect(issueTypes).toContain("duplicate");
+      expect(issueTypes).toContain("unknown-type");
+      expect(issueTypes.filter((o) => o === "dangling").length).toBe(3);
+
+      const duplicate = inventory.issues.find((o) => o.type === "duplicate");
+      expect(duplicate?.blocks).toEqual([0, 1]);
+
+      const unknown = inventory.issues.find((o) => o.type === "unknown-type");
+      expect(unknown?.blocks).toEqual([2]);
+    });
+
+    it("mismatched END type", () => {
+      const pem = ["-----BEGIN CERTIFICATE-----", base64_splitted, "-----END CRL-----"].join("\n");
+
+      const inventory = src.PemConverter.inspect(pem);
+
+      expect(inventory.ok).toBe(false);
+      expect(inventory.blocks).toEqual([]);
+      expect(inventory.dangling.length).toBe(1);
+      expect(inventory.dangling[0].kind).toBe("mismatched-end");
+      expect(inventory.dangling[0].type).toBe("CERTIFICATE");
+      expect(inventory.dangling[0].endType).toBe("CRL");
+      expect(inventory.issues.map((o) => o.type)).toEqual(["dangling"]);
+    });
+
+    it("malformed block body", () => {
+      const pem = ["-----BEGIN CERTIFICATE-----", "not a base64 body !!!", "-----END CERTIFICATE-----"].join("\n");
+
+      const inventory = src.PemConverter.inspect(pem);
+
+      expect(inventory.ok).toBe(false);
+      expect(inventory.blocks).toEqual([]);
+      expect(inventory.dangling.length).toBe(1);
+      expect(inventory.dangling[0].kind).toBe("malformed");
+      expect(inventory.dangling[0].type).toBe("CERTIFICATE");
+    });
+
+    it("dangling content between valid blocks", () => {
+      const pem = [certBlock, "odd text", crlBlock].join("\n");
+
+      const inventory = src.PemConverter.inspect(pem);
+
+      expect(inventory.ok).toBe(false);
+      expect(inventory.blocks.map((o) => o.type)).toEqual(["CERTIFICATE", "CRL"]);
+      expect(inventory.dangling.length).toBe(1);
+      expect(inventory.dangling[0].kind).toBe("text");
+      expect(inventory.dangling[0].text).toBe("odd text");
+      expect(inventory.dangling[0].offset).toBe(certBlock.length + 1);
+    });
+
+    it("custom knownTypes option", () => {
+      const inventory = src.PemConverter.inspect(certBlock, { knownTypes: ["FOO"] });
+
+      expect(inventory.ok).toBe(false);
+      expect(inventory.issues.length).toBe(1);
+      expect(inventory.issues[0].type).toBe("unknown-type");
+      expect(inventory.issues[0].blocks).toEqual([0]);
+    });
+
+    it("CRLF line endings", () => {
+      const pem = [certBlock, "trailing text"].join("\n").replace(/\n/g, "\r\n");
+
+      const inventory = src.PemConverter.inspect(pem);
+
+      expect(inventory.blocks.length).toBe(1);
+      expect(inventory.dangling.length).toBe(1);
+      expect(inventory.dangling[0].kind).toBe("text");
+    });
+  });
 });
