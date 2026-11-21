@@ -1,6 +1,6 @@
 import { AttributeTypeAndValue, Name as AsnName, RelativeDistinguishedName } from "@peculiar/asn1-x509";
 import { AsnConvert } from "@peculiar/asn1-schema";
-import { hex, isBufferSource, toArrayBuffer, utf8 } from "@peculiar/utils";
+import { equal, hex, isBufferSource, toArrayBuffer, utf8 } from "@peculiar/utils";
 import { hexOptions } from "./utils";
 import { cryptoProvider } from "./provider";
 
@@ -375,6 +375,19 @@ export class Name {
    */
   public toArrayBuffer() {
     return AsnConvert.serialize(this.asn);
+  }
+
+  /**
+   * Determines whether the specified Name is equal to the current one.
+   * Names are compared on their DER encoded bytes, so different string
+   * representations of the same X.500 name are treated as equal only when
+   * their ASN.1 encodings match.
+   *
+   * @param other Name to compare with the current one
+   * @returns `true` if the names are DER-equal, otherwise `false`
+   */
+  public isEqual(other: Name): boolean {
+    return equal(this.toArrayBuffer(), other.toArrayBuffer());
   }
 
   /**

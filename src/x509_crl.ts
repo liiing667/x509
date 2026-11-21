@@ -18,10 +18,50 @@ import { diAsnSignatureFormatter } from "./asn_signature_formatter";
 import { X509Certificate } from "./x509_cert";
 import { X509CrlEntry } from "./x509_crl_entry";
 import { PemConverter } from "./pem_converter";
-import { normalizeCertificateSerialNumber } from "./utils";
+import { getCertificateSerialNumber, normalizeCertificateSerialNumber } from "./utils";
 
 export interface X509CrlVerifyParams {
   publicKey: CryptoKey | PublicKey | X509Certificate;
+}
+
+export interface X509CrlRevocationParams extends X509CrlVerifyParams {
+  /**
+   * Certificate whose revocation status is checked. Its issuer must match the
+   * CRL issuer, and its serial number is looked up in the CRL entries.
+   */
+  certificate: X509Certificate;
+  /**
+   * Time at which the revocation status is evaluated. An expired CRL (current
+   * time is past `nextUpdate`) is not trusted. Defaults to the current time.
+   */
+  checkDate?: Date;
+}
+
+export interface X509CrlRevocationResult {
+  /**
+   * `true` when the certificate is listed as revoked in a valid, in-date CRL
+   * issued by the certificate's own issuer
+   */
+  revoked: boolean;
+  /**
+   * Matching CRL entry when the certificate is revoked, otherwise `null`
+   */
+  entry: X509CrlEntry | null;
+  /**
+   * Reason the certificate was not considered revoked by this CRL
+   */
+  reason: X509CrlRevocationError | null;
+}
+
+export enum X509CrlRevocationError {
+  /** CRL signature does not verify against the supplied public key */
+  invalidSignature = "invalidSignature",
+  /** CRL issuer name does not match the certificate issuer name */
+  issuerMismatch = "issuerMismatch",
+  /** CRL is expired: `checkDate` is after the CRL `nextUpdate` */
+  expired = "expired",
+  /** Certificate serial number is not present in the CRL */
+  notListed = "notListed",
 }
 
 /**
@@ -364,11 +404,56 @@ export class X509Crl extends PemData<CertificateList> {
     const serialNumber = typeof certOrSerialNumber === "string" ? certOrSerialNumber : certOrSerialNumber.serialNumber;
     const serialBuffer = normalizeCertificateSerialNumber(serialNumber);
     for (const revoked of this.asn.tbsCertList.revokedCertificates || []) {
-      if (equal(revoked.userCertificate, serialBuffer)) {
+      // Normalize both sides. CRL entries from other issuers may encode the
+      // serial with non-minimal leading zeros or a different sign-pad byte,
+      // so a raw byte comparison could miss an actually revoked certificate.
+      const revokedSerialBuffer = normalizeCertificateSerialNumber(getCertificateSerialNumber(revoked.userCertificate));
+      if (equal(revokedSerialBuffer, serialBuffer)) {
         return new X509CrlEntry(AsnConvert.serialize(revoked), this.parseOptions);
       }
     }
 
     return null;
+  }
+
+  /**
+   * Determines whether a certificate is revoked according to this CRL.
+   *
+   * A certificate is only treated as revoked when all of the following hold:
+   * - the CRL signature verifies against the supplied issuer public key;
+   * - the CRL issuer name equals the certificate's issuer name (the CRL
+   *   issuer, signing key and certificate share one identity);
+   * - the CRL is in date at `checkDate` (the time is not past `nextUpdate`);
+   * - the certificate serial number, compared after DER INTEGER
+   *   normalization so leading zeros and sign-pad bytes do not matter,
+   *   matches a CRL entry.
+   *
+   * An empty CRL (no revoked entries) passes the first three checks and
+   * reports the certificate as not revoked with `notListed`.
+   *
+   * @param params Revocation check parameters
+   * @param crypto Crypto provider. Default is from CryptoProvider
+   */
+  public async isRevoked(params: X509CrlRevocationParams, crypto = cryptoProvider.get()): Promise<X509CrlRevocationResult> {
+    const signatureValid = await this.verify({ publicKey: params.publicKey }, crypto);
+    if (!signatureValid) {
+      return { revoked: false, entry: null, reason: X509CrlRevocationError.invalidSignature };
+    }
+
+    if (!this.issuerName.isEqual(params.certificate.issuerName)) {
+      return { revoked: false, entry: null, reason: X509CrlRevocationError.issuerMismatch };
+    }
+
+    const checkDate = params.checkDate ?? new Date();
+    if (this.nextUpdate && checkDate.getTime() > this.nextUpdate.getTime()) {
+      return { revoked: false, entry: null, reason: X509CrlRevocationError.expired };
+    }
+
+    const entry = this.findRevoked(params.certificate);
+    if (!entry) {
+      return { revoked: false, entry: null, reason: X509CrlRevocationError.notListed };
+    }
+
+    return { revoked: true, entry, reason: null };
   }
 }

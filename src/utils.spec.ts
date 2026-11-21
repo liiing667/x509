@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { hex } from "@peculiar/utils";
-import { assertSingleAsnElement, normalizeCertificateSerialNumber } from "./utils";
+import { hex, toArrayBuffer } from "@peculiar/utils";
+import { assertSingleAsnElement, getCertificateSerialNumber, normalizeCertificateSerialNumber } from "./utils";
 
 describe("normalizeCertificateSerialNumber", () => {
   // Same hex input handling as pvtsutils 1.x Convert.FromHex, which v2 used.
@@ -40,5 +40,25 @@ describe("assertSingleAsnElement", () => {
     ["high tag number form", "9f810102010200"],
   ])("rejects trailing data after %s", (_name, text) => {
     expect(() => assertSingleAsnElement(hex.decode(text))).toThrow(/Unexpected data after the ASN\.1 structure: \d+ trailing bytes/);
+  });
+});
+
+describe("getCertificateSerialNumber", () => {
+  it.each([
+    // raw DER INTEGER content octets -> normalized hex serial
+    ["010203", "010203"],
+    ["00", "00"],
+    ["0000", "00"],
+    // non-minimal leading zeros are stripped
+    ["00010203", "010203"],
+    ["0000010203", "010203"],
+    // the single sign-pad byte before a high-bit value is stripped
+    ["0080", "80"],
+    ["00f6f3c8", "f6f3c8"],
+    // only one sign-pad byte may remain before the high bit
+    ["000080", "80"],
+    ["0000f6f3c8", "f6f3c8"],
+  ])("maps %j to %s", (raw, expected) => {
+    expect(getCertificateSerialNumber(toArrayBuffer(hex.decode(raw)))).toBe(expected);
   });
 });

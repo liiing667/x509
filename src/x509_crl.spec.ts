@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { AsnConvert } from "@peculiar/asn1-schema";
-import { CertificateList } from "@peculiar/asn1-x509";
+import { CertificateList, RevokedCertificate, Time } from "@peculiar/asn1-x509";
 import * as x509 from "./index";
-import { base64, toArrayBuffer } from "@peculiar/utils";
+import { base64, hex, toArrayBuffer } from "@peculiar/utils";
 
 const crypto = x509.cryptoProvider.get();
 
@@ -362,5 +362,217 @@ describe("crypto", () => {
       const entry2 = crl.findRevoked("1");
       expect(entry2).toBe(null);
     });
+  });
+});
+
+describe("X509Crl revocation checks", () => {
+  const alg = {
+    name: "ECDSA",
+    hash: "SHA-256",
+    namedCurve: "P-256",
+  };
+  const issuerName = "CN=Revocation CA, O=Test Org";
+  const otherIssuerName = "CN=Other CA, O=Test Org";
+  const thisUpdate = new Date("2023-01-01T00:00:00Z");
+  const nextUpdate = new Date("2023-01-08T00:00:00Z");
+  const withinWindow = new Date("2023-01-05T00:00:00Z");
+  const revokedSerial = "010203";
+  const revocationDate = new Date("2023-01-02T00:00:00Z");
+
+  let issuerKeys: CryptoKeyPair;
+  let otherKeys: CryptoKeyPair;
+  let revokedCert: x509.X509Certificate;
+  let goodCert: x509.X509Certificate;
+  let crl: x509.X509Crl;
+
+  beforeAll(async () => {
+    issuerKeys = await crypto.subtle.generateKey(alg, true, ["sign", "verify"]);
+    otherKeys = await crypto.subtle.generateKey(alg, true, ["sign", "verify"]);
+
+    revokedCert = await x509.X509CertificateGenerator.create({
+      serialNumber: revokedSerial,
+      subject: "CN=Revoked Leaf",
+      issuer: issuerName,
+      publicKey: issuerKeys.publicKey,
+      signingKey: issuerKeys.privateKey,
+      signingAlgorithm: alg,
+      notBefore: thisUpdate,
+      notAfter: new Date("2030-01-01T00:00:00Z"),
+    });
+    goodCert = await x509.X509CertificateGenerator.create({
+      serialNumber: "aabbcc",
+      subject: "CN=Good Leaf",
+      issuer: issuerName,
+      publicKey: issuerKeys.publicKey,
+      signingKey: issuerKeys.privateKey,
+      signingAlgorithm: alg,
+      notBefore: thisUpdate,
+      notAfter: new Date("2030-01-01T00:00:00Z"),
+    });
+
+    crl = await x509.X509CrlGenerator.create({
+      issuer: issuerName,
+      thisUpdate,
+      nextUpdate,
+      signingAlgorithm: alg,
+      signingKey: issuerKeys.privateKey,
+      entries: [
+        {
+          serialNumber: revokedSerial,
+          revocationDate,
+          reason: x509.X509CrlReason.keyCompromise,
+          invalidity: new Date("2023-01-01T12:00:00Z"),
+        },
+      ],
+    });
+  });
+
+  it("reports a revoked certificate with reason and invalidity preserved", async () => {
+    const result = await crl.isRevoked({
+      certificate: revokedCert,
+      publicKey: issuerKeys.publicKey,
+      checkDate: withinWindow,
+    });
+
+    expect(result.revoked).toBe(true);
+    expect(result.reason).toBeNull();
+    expect(result.entry).not.toBeNull();
+    expect(result.entry?.serialNumber).toBe(revokedSerial);
+    expect(result.entry?.reason).toBe(x509.X509CrlReason.keyCompromise);
+    expect(result.entry?.invalidity?.getTime()).toBe(new Date("2023-01-01T12:00:00Z").getTime());
+  });
+
+  it("reports a non-revoked certificate as not listed", async () => {
+    const result = await crl.isRevoked({
+      certificate: goodCert,
+      publicKey: issuerKeys.publicKey,
+      checkDate: withinWindow,
+    });
+
+    expect(result.revoked).toBe(false);
+    expect(result.reason).toBe(x509.X509CrlRevocationError.notListed);
+    expect(result.entry).toBeNull();
+  });
+
+  it("supports an empty CRL", async () => {
+    const emptyCrl = await x509.X509CrlGenerator.create({
+      issuer: issuerName,
+      thisUpdate,
+      nextUpdate,
+      signingAlgorithm: alg,
+      signingKey: issuerKeys.privateKey,
+    });
+
+    expect(emptyCrl.entries.length).toBe(0);
+    const result = await emptyCrl.isRevoked({
+      certificate: revokedCert,
+      publicKey: issuerKeys.publicKey,
+      checkDate: withinWindow,
+    });
+
+    expect(result.revoked).toBe(false);
+    expect(result.reason).toBe(x509.X509CrlRevocationError.notListed);
+  });
+
+  it("rejects a CRL signed by the wrong key", async () => {
+    const result = await crl.isRevoked({
+      certificate: revokedCert,
+      publicKey: otherKeys.publicKey,
+      checkDate: withinWindow,
+    });
+
+    expect(result.revoked).toBe(false);
+    expect(result.reason).toBe(x509.X509CrlRevocationError.invalidSignature);
+  });
+
+  it("rejects a CRL whose issuer does not match the certificate issuer", async () => {
+    // Signed by the same key material but carrying a different issuer name:
+    // name and key together identify the CRL issuer.
+    const foreignCrl = await x509.X509CrlGenerator.create({
+      issuer: otherIssuerName,
+      thisUpdate,
+      nextUpdate,
+      signingAlgorithm: alg,
+      signingKey: issuerKeys.privateKey,
+      entries: [{ serialNumber: revokedSerial, revocationDate }],
+    });
+
+    const result = await foreignCrl.isRevoked({
+      certificate: revokedCert,
+      publicKey: issuerKeys.publicKey,
+      checkDate: withinWindow,
+    });
+
+    expect(result.revoked).toBe(false);
+    expect(result.reason).toBe(x509.X509CrlRevocationError.issuerMismatch);
+  });
+
+  it("rejects an expired CRL", async () => {
+    const result = await crl.isRevoked({
+      certificate: revokedCert,
+      publicKey: issuerKeys.publicKey,
+      checkDate: new Date("2023-01-09T00:00:00Z"),
+    });
+
+    expect(result.revoked).toBe(false);
+    expect(result.reason).toBe(x509.X509CrlRevocationError.expired);
+  });
+
+  it("still accepts the CRL exactly at nextUpdate", async () => {
+    const result = await crl.isRevoked({
+      certificate: revokedCert,
+      publicKey: issuerKeys.publicKey,
+      checkDate: nextUpdate,
+    });
+
+    expect(result.revoked).toBe(true);
+  });
+
+  it("matches serial numbers encoded with non-minimal leading zeros", () => {
+    // Rebuild the CRL entry so the DER INTEGER content carries an extra
+    // leading zero ("00 01 02 03" instead of "01 02 03"), as a foreign or
+    // older CRL implementation might emit.
+    const asn = AsnConvert.parse(crl.rawData, CertificateList);
+    asn.tbsCertList.revokedCertificates = [
+      new RevokedCertificate({
+        userCertificate: toArrayBuffer(hex.decode("00010203")),
+        revocationDate: new Time(revocationDate),
+      }),
+    ];
+    const paddedCrl = new x509.X509Crl(AsnConvert.serialize(asn));
+
+    const entry = paddedCrl.findRevoked(revokedCert);
+    expect(entry).not.toBeNull();
+    expect(entry?.serialNumber).toBe(revokedSerial);
+
+    // Query string carrying the leading zero must normalize to the same value.
+    expect(paddedCrl.findRevoked("00010203")?.serialNumber).toBe(revokedSerial);
+  });
+
+  it("matches a high-bit serial regardless of sign padding", () => {
+    const highBitSerial = "f6f3c85e97e433070c51e0527b20b7f4";
+    const asn = AsnConvert.parse(crl.rawData, CertificateList);
+    // Sign-padded positive INTEGER content octets.
+    asn.tbsCertList.revokedCertificates = [
+      new RevokedCertificate({
+        userCertificate: toArrayBuffer(hex.decode(`00${highBitSerial}`)),
+        revocationDate: new Time(revocationDate),
+      }),
+    ];
+    const paddedCrl = new x509.X509Crl(AsnConvert.serialize(asn));
+
+    expect(paddedCrl.findRevoked(highBitSerial)?.serialNumber).toBe(highBitSerial);
+  });
+});
+
+describe("Name.isEqual", () => {
+  it("compares names on their DER encoding", () => {
+    const name = new x509.Name("CN=Test CA, O=Test Org");
+    const same = new x509.Name("O=Test Org, CN=Test CA");
+    const other = new x509.Name("CN=Other CA, O=Test Org");
+
+    expect(name.isEqual(new x509.Name("CN=Test CA, O=Test Org"))).toBe(true);
+    expect(name.isEqual(same)).toBe(false); // different RDN order => different DER
+    expect(name.isEqual(other)).toBe(false);
   });
 });
